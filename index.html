@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Interactive PageRank Simulation</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+    }
+    svg {
+      border: 1px solid #ccc;
+      width: 100%;
+      height: calc(100vh - 80px); /* subtract controls height */
+      cursor: crosshair;
+      display: block;
+    }
+
+    #controls { padding: 10px; background: #f0f0f0; display: flex; gap: 20px; align-items: center; height:60px;}
+    #drawControls, #simulateControls { display: flex; gap: 10px; align-items: center; }
+    .node circle { stroke: #333; stroke-width: 1.5px; }
+    .node text { font-size: 12px; text-anchor: middle; dominant-baseline: middle; }
+    .link { fill: none; stroke: #666; stroke-width: 1.5px; marker-end: url(#arrow); }
+    .hidden { display: none; }
+</style>
+</head>
+<body>
+
+<div id="controls">
+  <!-- Drawing Mode Controls -->
+  <div id="drawControls">
+    <button id="switchBtn">Switch to Simulation</button>
+    <p>Click to add nodes, drag from one node to another to create edges.</p>
+  </div>
+
+  <!-- Simulation Mode Controls -->
+  <div id="simulateControls" style="display:none;">
+    <button id="startBtn">Start</button>
+    <button id="stopBtn">Stop</button>
+    <button id="stepBtn">Step</button>
+    <label>Delay: <input type="range" id="delaySlider" min="10" max="400" value="200"></label>
+    <button id="resetBtn">Reset Simulation</button>
+    <button id="newBtn">New Graph</button>
+  </div>
+</div>
+
+<svg id="graph"></svg>
+
+<script>
+const svg = d3.select("#graph");
+const width = window.innerWidth;
+
+let nodes = [];
+let edges = [];
+let ranks = {};
+let nextId = 1;
+let mode = "draw"; // "draw" or "simulate"
+let simulationRunning = false;
+let timer = null;
+
+// Arrow marker for directed edges
+svg.append("defs").append("marker")
+    .attr("id", "arrow")
+    .attr("viewBox", "0 -5 10 10")
+    .attr("refX", 20)
+    .attr("refY", 0)
+    .attr("markerWidth", 6)
+    .attr("markerHeight", 6)
+    .attr("orient", "auto")
+  .append("path")
+    .attr("d", "M0,-5L10,0L0,5")
+    .attr("fill", "#666");
+
+// Drag line for edge creation
+let dragLine = svg.append("path")
+    .attr("class", "dragline hidden")
+    .attr("stroke", "#999")
+    .attr("stroke-width", 2)
+    .attr("fill", "none");
+
+let sourceNode = null;
+
+// Add node on click (only in draw mode)
+svg.on("click", function(event) {
+    if (mode !== "draw") return;
+    const [x, y] = d3.pointer(event);
+
+    const r = Math.floor(Math.random() * 200 + 55); // avoid too dark
+    const g = Math.floor(Math.random() * 200 + 55);
+    const b = Math.floor(Math.random() * 200 + 55);
+    color = `rgb(${r},${g},${b})`;
+    textColor = (0.299*r + 0.587*g + 0.114*b) > 128 ? "black" : "white";
+
+    nodes.push({id: nextId++, x, y, color, textColor});
+    updateGraph();
+});
+
+// Drag behavior for creating edges
+const drag = d3.drag()
+    .on("start", function(event, d) {
+        if (mode !== "draw") return;
+        sourceNode = d;
+        dragLine.classed("hidden", false)
+            .attr("d", `M${d.x},${d.y}L${d.x},${d.y}`);
+    })
+    .on("drag", function(event, d) {
+        if (mode !== "draw") return;
+        dragLine.attr("d", `M${sourceNode.x},${sourceNode.y}L${event.x},${event.y}`);
+    })
+    .on("end", function(event, d) {
+        if (mode !== "draw") return;
+        dragLine.classed("hidden", true);
+        const [x, y] = [event.x, event.y];
+        const targetNode = nodes.find(n => Math.hypot(n.x - x, n.y - y) < 20);
+        if (targetNode) {
+            edges.push({source: sourceNode.id, target: targetNode.id});
+            updateGraph();
+        }
+        sourceNode = null;
+    });
+
+function updateGraph() {
+
+    // Compute min/max rank for scaling
+    const minRank = Object.values(ranks).length ? Math.min(...Object.values(ranks)) : 0;
+    const maxRank = Object.values(ranks).length ? Math.max(...Object.values(ranks)) : 100;
+
+
+ // Draw edges (lines for normal edges, arcs for loops)
+    svg.selectAll(".link").data(edges).join("path")
+        .attr("class", "link")
+        .attr("d", d => {
+            const src = nodes.find(n => n.id === d.source);
+            const tgt = nodes.find(n => n.id === d.target);
+            const srcRadius = mode === "simulate"
+                ? 20 + 40 * (ranks[src.id] - minRank) / (maxRank - minRank + 1e-9)
+                : 20;
+            const tgtRadius = mode === "simulate"
+                ? 20 + 40 * (ranks[tgt.id] - minRank) / (maxRank - minRank + 1e-9)
+                : 20;
+
+            if (d.source === d.target) {
+                // Self-loop: draw an arc
+                const angle =  Math.PI / 6;
+                const r = srcRadius;
+                const startX = src.x - r * Math.cos(Math.PI / 2 + angle);
+                const startY = src.y - r * Math.sin(Math.PI / 2 + angle);
+                const endX = src.x - r * Math.cos(Math.PI / 2 - angle);
+                const endY = src.y - r * Math.sin(Math.PI / 2 - angle);
+                const controlX = src.x;
+                const controlY = src.y - (r + 100); // control point above node
+                return `M${startX},${startY} Q${controlX},${controlY} ${endX},${endY}`;
+
+            } else {
+                // Normal edge: offset by radii
+                const dx = tgt.x - src.x, dy = tgt.y - src.y;
+                const dist = Math.hypot(dx, dy);
+                const x1 = src.x + (dx / dist) * srcRadius;
+                const y1 = src.y + (dy / dist) * srcRadius;
+                const x2 = tgt.x - (dx / dist) * tgtRadius;
+                const y2 = tgt.y - (dy / dist) * tgtRadius;
+                return `M${x1},${y1} L${x2},${y2}`;
+            }
+        });
+
+    // Draw nodes
+    const nodeGroup = svg.selectAll(".node").data(nodes, d => d.id).join(enter => {
+        const g = enter.append("g").attr("class", "node");
+        g.append("circle");
+        g.append("text");
+        return g.call(drag);
+    });
+
+    nodeGroup.attr("transform", d => `translate(${d.x},${d.y})`);
+    nodeGroup.select("circle")
+        .attr("r", d => mode === "simulate"
+            ? 20 + 40 * (ranks[d.id] - minRank) / (maxRank - minRank + 1e-9)
+            : 20)
+        .attr("fill", d => d.color);
+    nodeGroup.select("text")
+        .attr("fill", d => d.textColor)
+        .text(d => mode === "simulate"
+            ? `${ranks[d.id].toFixed(2)}`
+            : `${d.id}`);
+}
+
+// PageRank step (simple additive model)
+function pagerankStep() {
+    let newRanks = {};
+    nodes.forEach(n => newRanks[n.id] = 0);
+    nodes.forEach(n => {
+        const outEdges = edges.filter(e => e.source === n.id);
+        if (outEdges.length === 0) return;
+        const share = ranks[n.id] / outEdges.length;
+        outEdges.forEach(e => newRanks[e.target] += share);
+    });
+    ranks = newRanks;
+    updateGraph();
+}
+
+// Simulation controls
+function startSimulation() {
+    if (simulationRunning) return;
+    simulationRunning = true;
+    const delay = +document.getElementById("delaySlider").value;
+    timer = d3.interval(() => pagerankStep(), delay);
+}
+
+function stopSimulation() {
+    simulationRunning = false;
+    if (timer) timer.stop();
+}
+
+function updateDelay(newDelay) {
+    if (timer) timer.stop(); // stop old interval
+    timer = d3.interval(() => pagerankStep(), newDelay);
+}
+
+
+// Switch to simulation mode
+document.getElementById("switchBtn").onclick = () => {
+    mode = "simulate";
+    document.getElementById("drawControls").style.display = "none";
+    document.getElementById("simulateControls").style.display = "flex";
+    // Initialize ranks
+    ranks = {};
+    nodes.forEach(n => ranks[n.id] = 100.0/nodes.length);
+    updateGraph();
+};
+
+
+
+document.getElementById("delaySlider").oninput = (e) => {
+    const newDelay = +e.target.value;
+    if (simulationRunning) {
+        updateDelay(newDelay);
+    }
+};
+
+
+document.getElementById("startBtn").onclick = startSimulation;
+document.getElementById("stopBtn").onclick = stopSimulation;
+document.getElementById("stepBtn").onclick = pagerankStep;
+document.getElementById("resetBtn").onclick = () => {
+    stopSimulation();
+    ranks = {};
+    nodes.forEach(n => ranks[n.id] = 100.0/nodes.length);
+    updateGraph();
+};
+
+document.getElementById("newBtn").onclick = () => {
+    stopSimulation();
+    nodes = [];
+    edges = [];
+    ranks = {};
+    nextId = 1;
+    mode = "draw"; // "draw" or "simulate"
+    document.getElementById("drawControls").style.display = "flex";
+    document.getElementById("simulateControls").style.display = "none";
+    simulationRunning = false;
+    timer = null;
+    updateGraph();
+};
+
+updateGraph();
+</script>
+</body>
+</html>
